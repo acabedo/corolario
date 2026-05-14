@@ -29,7 +29,7 @@ Corolario toma como entrada una tabla de grupos tonales (F0 inicial, F0 final, p
 - Paquetes:
 
 ```r
-install.packages(c("shiny", "tidyverse", "zoo", "ggplot2", "scales", "DT", "readr"))
+install.packages(c("shiny", "tidyverse", "zoo", "ggplot2", "plotly", "scales", "DT", "readr"))
 ```
 
 ### Ejecutar localmente
@@ -143,7 +143,7 @@ La ruptura por patrón valle es **asimétrica**: los arcos (sube→baja dentro d
 ## Tecnología
 
 - [R](https://www.r-project.org/) + [Shiny](https://shiny.posit.co/)
-- [tidyverse](https://www.tidyverse.org/) · [ggplot2](https://ggplot2.tidyverse.org/) · [DT](https://rstudio.github.io/DT/) · [zoo](https://cran.r-project.org/package=zoo)
+- [tidyverse](https://www.tidyverse.org/) · [ggplot2](https://ggplot2.tidyverse.org/) · [plotly](https://plotly.com/r/) · [DT](https://rstudio.github.io/DT/) · [zoo](https://cran.r-project.org/package=zoo)
 - Demo desplegada con [Shinylive](https://posit-dev.github.io/r-shinylive/) vía GitHub Pages
 
 ---

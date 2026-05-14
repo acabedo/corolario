@@ -6,6 +6,7 @@ library(shiny)
 library(tidyverse)
 library(zoo)
 library(ggplot2)
+library(plotly)
 library(scales)
 library(DT)
 library(readr)
@@ -262,6 +263,7 @@ hacer_grafico <- function(res, ventana, umbral_st, umbral_local) {
     arrange(x_ini) |>
     mutate(fila = row_number() %% 2,
            y_arr  = y_max * 1.07 + fila * y_max * 0.05,
+           y_lbl  = y_arr + y_max * 0.055,
            x_ini2 = ifelse(x_ini == x_fin, x_ini - 0.25, x_ini),
            x_fin2 = ifelse(x_ini == x_fin, x_fin + 0.25, x_fin))
 
@@ -283,16 +285,15 @@ hacer_grafico <- function(res, ventana, umbral_st, umbral_local) {
           color = clausula),
       linewidth = 1.05,
       arrow = arrow(length = unit(0.2, "cm"), ends = "last", type = "closed")) +
-    geom_label(data = flechas,
-      aes(x = (x_ini2 + x_fin2) / 2, y = y_arr,
+    geom_text(data = flechas,
+      aes(x = (x_ini2 + x_fin2) / 2, y = y_lbl,
           label = paste0(clausula, "\n(", dir_slope_st, ")"), color = clausula),
-      vjust = -0.35, size = 2.4, fill = "white",
-      label.padding = unit(0.12, "lines"), label.size = 0.2, show.legend = FALSE) +
+      size = 2.4, lineheight = 0.85, show.legend = FALSE) +
     scale_color_manual(values = pal) +
     scale_fill_manual(values  = pal) +
     scale_x_continuous(breaks = res$x, labels = paste0(res$enunciado, "\ng", res$grupo),
                        expand = expansion(mult = 0.03)) +
-    scale_y_continuous(expand = expansion(mult = c(0.06, 0.28))) +
+    scale_y_continuous(expand = expansion(mult = c(0.06, 0.42))) +
     labs(title = "Progresiones de F0 por clausula",
          subtitle = sprintf("o=F0 ini  ^=F0 fin  |  Ventana: %d  |  Umbral ST: %.2f  |  Umbral local: %.2f ST",
                             ventana, umbral_st, umbral_local),
@@ -432,9 +433,7 @@ ui <- fluidPage(
               actionButton("btn_todo",    "Todos",     class="btn-clear"),
               actionButton("btn_primero5","Primeros 5",class="btn-clear"),
               uiOutput("lbl_n_grupos"))))),
-        div(style="margin-bottom:10px;",
-          downloadButton("btn_export_graf", "Exportar PNG", class="btn-clear")),
-        plotOutput("grafico", height="520px"),
+        plotlyOutput("grafico", height="520px"),
         br(),
         div(class="sec-label","Valores del grafico"),
         DTOutput("tabla_graf")
@@ -468,12 +467,12 @@ ui <- fluidPage(
 
           tabPanel("Por clausula", br(),
             fluidRow(
-              column(6, div(class="sec-label","Reajuste F0 (Hz)"),   plotOutput("box_hz_g",  height="280px")),
-              column(6, div(class="sec-label","Reajuste F0 (%)"),    plotOutput("box_pct_g", height="280px"))
+              column(6, div(class="sec-label","Reajuste F0 (Hz)"),   plotlyOutput("box_hz_g",  height="280px")),
+              column(6, div(class="sec-label","Reajuste F0 (%)"),    plotlyOutput("box_pct_g", height="280px"))
             ),
             fluidRow(
-              column(6, div(class="sec-label","Reajuste F0 (ST)"),   plotOutput("box_st_g",  height="280px")),
-              column(6, div(class="sec-label","Pausa anterior (s)"), plotOutput("box_pau_g", height="280px"))
+              column(6, div(class="sec-label","Reajuste F0 (ST)"),   plotlyOutput("box_st_g",  height="280px")),
+              column(6, div(class="sec-label","Pausa anterior (s)"), plotlyOutput("box_pau_g", height="280px"))
             ),
             br(), div(class="sec-label","Estadisticos por clausula"),
             DTOutput("tabla_trans_g"),
@@ -490,7 +489,7 @@ ui <- fluidPage(
             br(),
             fluidRow(
               column(8, div(class="sec-label","Dispersion reajuste ST ~ pausa anterior"),
-                plotOutput("plot_corr", height="340px"))
+                plotlyOutput("plot_corr", height="340px"))
             )
           )
         )
@@ -512,9 +511,7 @@ ui <- fluidPage(
         ),
         br(),
         div(class="sec-label","Clausulas segun numero de enunciados que las componen"),
-        div(style="margin-bottom:10px;",
-          downloadButton("btn_export_chi", "Exportar PNG", class="btn-clear")),
-        plotOutput("barplot_chi", height="500px"),
+        plotlyOutput("barplot_chi", height="500px"),
         br(),
         div(class="sec-label","Tabla de contingencia (conteos)"),
         DTOutput("tabla_chi"),
@@ -636,28 +633,26 @@ server <- function(input, output, session) {
     resultado()[desde:hasta, ] |> mutate(x = row_number())
   })
 
-  output$grafico <- renderPlot({
+  pl_config <- function(p, filename = "corolario") {
+    p |> config(
+      displayModeBar = TRUE,
+      modeBarButtonsToRemove = list("select2d","lasso2d","autoScale2d"),
+      toImageButtonOptions = list(format="png", filename=filename,
+                                  width=1400, height=700, scale=2),
+      locale = "es"
+    )
+  }
+
+  output$grafico <- renderPlotly({
     req(resultado_graf())
     nivel <- input$nivel_slope %||% "grupo"
     df    <- resultado_graf()
     if (nivel == "enunciado") {
       df <- df |> mutate(clausula = clausula_enun_st, dir_slope_st = dir_enun_st)
     }
-    hacer_grafico(df, input$ventana, input$umbral_st, input$umbral_local)
-  }, res=110)
-
-  output$btn_export_graf <- downloadHandler(
-    filename = function() paste0("clausulas_f0_", Sys.Date(), ".png"),
-    content = function(file) {
-      nivel <- input$nivel_slope %||% "grupo"
-      df    <- resultado_graf()
-      if (nivel == "enunciado") {
-        df <- df |> mutate(clausula = clausula_enun_st, dir_slope_st = dir_enun_st)
-      }
-      p <- hacer_grafico(df, input$ventana, input$umbral_st, input$umbral_local)
-      ggsave(file, plot = p, width = 13, height = 7, dpi = 150, bg = "white")
-    }
-  )
+    p <- hacer_grafico(df, input$ventana, input$umbral_st, input$umbral_local)
+    ggplotly(p, tooltip = c("x","y","colour")) |> pl_config("clausulas_f0")
+  })
 
   output$tabla_graf <- renderDT({
     req(resultado_graf())
@@ -791,15 +786,19 @@ server <- function(input, output, session) {
   }
 
   # -- Sub-tab A: Por clausula (x = direction / clausula type) ----------------
-  output$box_hz_g  <- renderPlot({ req(trans_base()); box_plot(trans_base(),"dir","trans_hz","Reajuste F0 (Hz)") }, res=110)
-  output$box_pct_g <- renderPlot({ req(trans_base()); box_plot(trans_base(),"dir","trans_pct","Reajuste F0 (%)") }, res=110)
-  output$box_st_g  <- renderPlot({ req(trans_base()); box_plot(trans_base(),"dir","trans_st","Reajuste F0 (ST)") }, res=110)
-  output$box_pau_g <- renderPlot({
+  as_plotly_box <- function(p, fname) ggplotly(p, tooltip=c("y","fill")) |> pl_config(fname)
+
+  output$box_hz_g  <- renderPlotly({ req(trans_base()); as_plotly_box(box_plot(trans_base(),"dir","trans_hz","Reajuste F0 (Hz)"),  "reajuste_hz") })
+  output$box_pct_g <- renderPlotly({ req(trans_base()); as_plotly_box(box_plot(trans_base(),"dir","trans_pct","Reajuste F0 (%)"), "reajuste_pct") })
+  output$box_st_g  <- renderPlotly({ req(trans_base()); as_plotly_box(box_plot(trans_base(),"dir","trans_st","Reajuste F0 (ST)"),  "reajuste_st") })
+  output$box_pau_g <- renderPlotly({
     req(trans_base())
     df <- trans_base() |> filter(!is.na(pausa_ant))
-    if (nrow(df)==0) ggplot()+annotate("text",x=1,y=1,label="Sin datos de pausa",size=5,color="grey60")+theme_void()
-    else box_plot(df,"dir","pausa_ant","Pausa anterior (s)", show_hline=FALSE)
-  }, res=110)
+    p  <- if (nrow(df)==0)
+            ggplot()+annotate("text",x=1,y=1,label="Sin datos de pausa",size=5,color="grey60")+theme_void()
+          else box_plot(df,"dir","pausa_ant","Pausa anterior (s)", show_hline=FALSE)
+    as_plotly_box(p, "pausa")
+  })
   output$tabla_trans_g <- renderDT({ req(trans_base()); stats_tbl(trans_base(),"dir") })
 
   output$glosario_variables <- renderUI({
@@ -892,16 +891,17 @@ server <- function(input, output, session) {
       rownames=FALSE, class="stripe hover")
   })
 
-  output$plot_corr <- renderPlot({
+  output$plot_corr <- renderPlotly({
     req(trans_base())
     df <- trans_base() |> filter(!is.na(trans_st), !is.na(pausa_ant), pausa_ant > 0)
     if (nrow(df) < 3) {
-      return(ggplot() +
+      p <- ggplot() +
         annotate("text",x=1,y=1,label="Sin datos suficientes con pausa > 0",size=5,color="grey60") +
-        theme_void())
+        theme_void()
+      return(ggplotly(p) |> pl_config("correlacion"))
     }
     r_val <- round(cor(df$trans_st, df$pausa_ant, use="complete.obs"), 3)
-    ggplot(df, aes(x=pausa_ant, y=trans_st, color=dir)) +
+    p <- ggplot(df, aes(x=pausa_ant, y=trans_st, color=dir)) +
       geom_hline(yintercept=0, linetype="dashed", color="grey70", linewidth=0.4) +
       geom_point(size=2.5, alpha=0.8) +
       geom_smooth(method="lm", se=TRUE, color="#1a1a1a", fill="#1a1a1a", alpha=0.1,
@@ -915,7 +915,8 @@ server <- function(input, output, session) {
             legend.position="bottom",
             plot.title=element_text(face="bold", size=11),
             plot.background=element_rect(fill="white", color=NA))
-  }, res=110)
+    ggplotly(p, tooltip=c("x","y","colour")) |> pl_config("correlacion_reajuste_pausa")
+  })
 
   # ---------------------------------------------------------------------------
   # Tab 6: Chi cuadrado
@@ -1032,20 +1033,20 @@ server <- function(input, output, session) {
       )
   })
 
-  output$barplot_chi <- renderPlot({
+  output$barplot_chi <- renderPlotly({
     req(cat_data())
     df <- cat_data()
 
     pal <- c(
-      "Pura\n(1 enunciado)"       = "#2d2d2d",
-      "Mixta\ncruce en frontera"  = "#f39c12",
-      "Mixta\nsin cruce directo"  = "#e74c3c"
+      "Pura\n(1 enunciado)"       = "#4a4a4a",
+      "Mixta\ncruce en frontera"  = "#d68910",
+      "Mixta\nsin cruce directo"  = "#c0392b"
     )
 
-    ggplot(df, aes(x = categoria, y = pct, fill = categoria)) +
+    p <- ggplot(df, aes(x = categoria, y = pct, fill = categoria)) +
       geom_col(width = 0.55, color = "white", linewidth = 0.4) +
-      geom_text(aes(label = label), vjust = -0.5,
-                size = 4, fontface = "bold", color = "#1a1a1a",
+      geom_text(aes(y = pct / 2, label = label),
+                size = 4, fontface = "bold", color = "white",
                 lineheight = 0.9) +
       scale_fill_manual(values = pal, drop = FALSE) +
       scale_y_continuous(labels = function(x) paste0(x, "%"),
@@ -1067,39 +1068,8 @@ server <- function(input, output, session) {
         legend.position = "none",
         plot.background = element_rect(fill = "white", color = NA)
       )
-  }, res = 110)
-
-  output$btn_export_chi <- downloadHandler(
-    filename = function() paste0("clausulas_chi_", Sys.Date(), ".png"),
-    content  = function(file) {
-      df  <- cat_data()
-      pal <- c(
-        "Pura\n(1 enunciado)"      = "#2d2d2d",
-        "Mixta\ncruce en frontera" = "#f39c12",
-        "Mixta\nsin cruce directo" = "#e74c3c"
-      )
-      p <- ggplot(df, aes(x = categoria, y = pct, fill = categoria)) +
-        geom_col(width = 0.55, color = "white", linewidth = 0.4) +
-        geom_text(aes(label = label), vjust = -0.5,
-                  size = 4, fontface = "bold", color = "#1a1a1a", lineheight = 0.9) +
-        scale_fill_manual(values = pal, drop = FALSE) +
-        scale_y_continuous(labels = function(x) paste0(x, "%"),
-                           expand = expansion(mult = c(0, 0.18)), limits = c(0, NA)) +
-        labs(title = "Distribucion de clausulas segun enunciados que las componen",
-             subtitle = paste0("Total clausulas: ", sum(df$n_clausulas),
-                               "  |  Clausulas mixtas: ",
-                               sum(df$n_clausulas[df$n_enun > 1]),
-                               " (", round(sum(df$pct[df$n_enun > 1]), 1), "%)"),
-             x = NULL, y = "% de clausulas") +
-        theme_minimal(base_size = 14) +
-        theme(panel.grid.major.x = element_blank(), panel.grid.minor = element_blank(),
-              plot.title = element_text(face = "bold", size = 14),
-              plot.subtitle = element_text(color = "grey50", size = 11),
-              axis.text.x = element_text(size = 12), legend.position = "none",
-              plot.background = element_rect(fill = "white", color = NA))
-      ggsave(file, plot = p, width = 8, height = 6, dpi = 150, bg = "white")
-    }
-  )
+    ggplotly(p, tooltip = c("x", "y")) |> pl_config("clausulas_chi")
+  })
 
   # Tabla de contingencia como DT
   output$tabla_chi <- renderDT({
