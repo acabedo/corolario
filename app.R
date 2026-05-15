@@ -129,50 +129,64 @@ parse_wide <- function(df) {
 # CALCULO PRINCIPAL
 # =============================================================================
 calcular <- function(dl, ventana, umbral_pct, umbral_st, umbral_local,
-                     umbral_prog_st, umbral_prog_pct) {
+                     umbral_prog_st, umbral_prog_pct, consecutivo = TRUE) {
 
-  # Step 1: per-group metrics
-  dl2 <- dl |>
+  # Global sequential index (always across all groups regardless of mode)
+  dl <- dl |> mutate(x = row_number())
+
+  # Helper: renumber local clause names (per-utterance) to globally sequential ones
+  renumber_clauses <- function(enun, local_cl) {
+    keys  <- paste0(enun, "|||", local_cl)
+    ukeys <- unique(keys)
+    mapping <- setNames(paste0("clausula", seq_along(ukeys)), ukeys)
+    mapping[keys]
+  }
+
+  # Steps 1-3: per-group metrics, rolling slope, clause assignment.
+  # When consecutivo = TRUE  → computed across all groups (existing behaviour).
+  # When consecutivo = FALSE → computed within each utterance independently.
+  grp <- if (consecutivo) dl else group_by(dl, enunciado)
+
+  dl2 <- grp |>
     mutate(
-      x            = row_number(),
-      dir_grupo    = dir_propio(f0_ini, f0_fin, umbral_st),
-      delta_hz     = f0_ini - lag(f0_ini),
-      delta_pct    = delta_hz / lag(f0_ini) * 100,
-      delta_st     = hz_a_st(lag(f0_ini), f0_ini),
-      dir_local    = etiquetar(delta_st, umbral_local),
-      reajuste_hz  = f0_ini - lag(f0_fin),
-      reajuste_pct = (f0_ini - lag(f0_fin)) / lag(f0_fin) * 100,
-      reajuste_st  = hz_a_st(lag(f0_fin), f0_ini),
+      dir_grupo     = dir_propio(f0_ini, f0_fin, umbral_st),
+      delta_hz      = f0_ini - lag(f0_ini),
+      delta_pct     = delta_hz / lag(f0_ini) * 100,
+      delta_st      = hz_a_st(lag(f0_ini), f0_ini),
+      dir_local     = etiquetar(delta_st, umbral_local),
+      reajuste_hz   = f0_ini - lag(f0_fin),
+      reajuste_pct  = (f0_ini - lag(f0_fin)) / lag(f0_fin) * 100,
+      reajuste_st   = hz_a_st(lag(f0_fin), f0_ini),
       inflexion_pct = (f0_fin - f0_ini) / f0_ini * 100,
       inflexion_st  = hz_a_st(f0_ini, f0_fin),
-      # Valley-pattern split: current group rises internally AND previous fell.
-      # Asymmetric: arches (rise→fall) are NOT split; only valleys (fall→rise).
-      force_split = inflexion_st > umbral_local &
-                    !is.na(lag(inflexion_st)) &
-                    lag(inflexion_st) < -umbral_local,
-      force_split = coalesce(force_split, FALSE)
-    )
-
-  # Step 2: rolling slope of f0_ini across groups
-  dl2 <- dl2 |>
-    mutate(
-      slope_st_v  = rollapply(f0_ini, width = ventana, FUN = slope_st_fn,
-                               fill = NA, align = "right", partial = TRUE),
-      slope_pct_v = rollapply(f0_ini, width = ventana, FUN = slope_pct_fn,
-                               fill = NA, align = "right", partial = TRUE),
+      # Valley-pattern split: current rises AND previous fell (asymmetric).
+      force_split   = inflexion_st > umbral_local &
+                      !is.na(lag(inflexion_st)) &
+                      lag(inflexion_st) < -umbral_local,
+      force_split   = coalesce(force_split, FALSE),
+      slope_st_v    = rollapply(f0_ini, width = ventana, FUN = slope_st_fn,
+                                fill = NA, align = "right", partial = TRUE),
+      slope_pct_v   = rollapply(f0_ini, width = ventana, FUN = slope_pct_fn,
+                                fill = NA, align = "right", partial = TRUE),
       dir_slope_st  = etiquetar(slope_st_v,  umbral_st),
-      dir_slope_pct = etiquetar(slope_pct_v, umbral_pct)
-    )
-
-  # Step 3: provisional clause assignment
-  # clausula_slope_st respects valley-pattern splits via force_split.
-  dl2 <- dl2 |>
+      dir_slope_pct = etiquetar(slope_pct_v, umbral_pct),
+      # In non-consecutive mode, fall back to within-group direction when the
+      # rolling window is too short (typically the first group of each utterance).
+      # This makes clause assignment sensitive to each group's own movement.
+      .dir_cl_st  = if (consecutivo) dir_slope_st  else coalesce(dir_slope_st,  dir_grupo),
+      .dir_cl_pct = if (consecutivo) dir_slope_pct else coalesce(dir_slope_pct, dir_grupo),
+      .cl_st      = asignar_clausulas(.dir_cl_st, force_split),
+      .cl_pct     = asignar_clausulas(.dir_cl_pct),
+      .cl_loc     = asignar_clausulas(dir_local)
+    ) |>
+    ungroup() |>
     mutate(
-      clausula_slope_st  = asignar_clausulas(dir_slope_st, force_split),
-      clausula_slope_pct = asignar_clausulas(dir_slope_pct),
-      clausula_local     = asignar_clausulas(dir_local),
+      clausula_slope_st  = if (consecutivo) .cl_st  else renumber_clauses(enunciado, .cl_st),
+      clausula_slope_pct = if (consecutivo) .cl_pct else renumber_clauses(enunciado, .cl_pct),
+      clausula_local     = if (consecutivo) .cl_loc else renumber_clauses(enunciado, .cl_loc),
       clausula           = clausula_slope_st
-    )
+    ) |>
+    select(-.cl_st, -.cl_pct, -.cl_loc, -.dir_cl_st, -.dir_cl_pct)
 
   # Step 4: per-clause slope (fits regression only on groups within each clause)
   # This corrects direction for multi-group clauses where the rolling window
@@ -384,9 +398,12 @@ ui <- fluidPage(
         fileInput("file_upload", NULL, accept=c(".txt",".csv",".tsv"),
                   buttonLabel="Elegir archivo", placeholder="ningun archivo"),
         br(),
-        div(style="display:flex;gap:10px;",
+        div(style="display:flex;gap:10px;align-items:center;",
           actionButton("btn_parse","Procesar datos", class="btn-parse"),
-          actionButton("btn_clear","Limpiar",        class="btn-clear"))
+          actionButton("btn_clear","Limpiar",        class="btn-clear"),
+          div(style="margin-left:6px;",
+            checkboxInput("consecutivo", "Grupos consecutivos entre enunciados",
+                          value = TRUE)))
       ),
 
       # TAB 2: Tabla
@@ -497,12 +514,7 @@ ui <- fluidPage(
 
       # TAB 6: Chi cuadrado
       tabPanel("06 | Chi cuadrado",
-        div(class="info-box", HTML(
-          "Cada clausula se clasifica en tres categorias:<br>
-           <b>Pura</b>: todos sus grupos pertenecen al mismo enunciado.<br>
-           <b>Mixta — cruce en frontera</b>: contiene el grupo final de un enunciado y el grupo inicial del siguiente (la clausula cruza exactamente la juntura entre enunciados).<br>
-           <b>Mixta — sin cruce directo</b>: agrupa grupos de enunciados distintos pero sin estar en la frontera inmediata.<br>
-           El test chi cuadrado evalua la asociacion global entre enunciados y clausulas.")),
+        uiOutput("tab6_infobox"),
         fluidRow(
           column(3, uiOutput("chi_stat_chi2")),
           column(3, uiOutput("chi_stat_p")),
@@ -510,13 +522,13 @@ ui <- fluidPage(
           column(3, uiOutput("chi_stat_mix"))
         ),
         br(),
-        div(class="sec-label","Clausulas segun numero de enunciados que las componen"),
+        uiOutput("tab6_label_bar"),
         plotlyOutput("barplot_chi", height="500px"),
         br(),
         div(class="sec-label","Tabla de contingencia (conteos)"),
         DTOutput("tabla_chi"),
         br(),
-        div(class="sec-label","Clausulas mixtas (grupos de mas de un enunciado)"),
+        uiOutput("tab6_label_table2"),
         DTOutput("tabla_mixtas")
       )
     )
@@ -570,7 +582,8 @@ server <- function(input, output, session) {
     req(datos_largos())
     calcular(datos_largos(), input$ventana, input$umbral_pct,
              input$umbral_st, input$umbral_local,
-             input$umbral_prog_st, input$umbral_prog_pct)
+             input$umbral_prog_st, input$umbral_prog_pct,
+             consecutivo = isTRUE(input$consecutivo))
   })
 
   # ---------------------------------------------------------------------------
@@ -922,6 +935,95 @@ server <- function(input, output, session) {
   # Tab 6: Chi cuadrado
   # ---------------------------------------------------------------------------
 
+  # Dynamic section labels and info box
+  output$tab6_infobox <- renderUI({
+    if (isTRUE(input$consecutivo)) {
+      div(class = "info-box", HTML(
+        "Cada clausula se clasifica en tres categorias:<br>
+         <b>Pura</b>: todos sus grupos pertenecen al mismo enunciado.<br>
+         <b>Mixta — cruce en frontera</b>: contiene el grupo final de un enunciado y el grupo inicial del siguiente.<br>
+         <b>Mixta — sin cruce directo</b>: agrupa grupos de enunciados distintos sin estar en la frontera inmediata.<br>
+         El test chi cuadrado evalua la asociacion global entre enunciados y clausulas."))
+    } else {
+      div(class = "info-box", HTML(
+        "Modo no consecutivo: las clausulas estan contenidas dentro de cada enunciado.<br>
+         Los enunciados se clasifican segun cuantas clausulas tonales integran en su interior:<br>
+         <b>1 clausula</b>: correspondencia plena entre enunciado y clausula entonativa.<br>
+         <b>2 clausulas</b>: el enunciado se divide en dos clausulas de distinta direccion.<br>
+         <b>3+ clausulas</b>: el enunciado presenta tres o mas clausulas internas.<br>
+         El test chi cuadrado evalua si la distribucion de direcciones por enunciado es homogenea."))
+    }
+  })
+  output$tab6_label_bar <- renderUI({
+    lbl <- if (isTRUE(input$consecutivo))
+      "Clausulas segun numero de enunciados que las componen"
+    else
+      "Enunciados segun numero de clausulas en su interior"
+    div(class = "sec-label", lbl)
+  })
+  output$tab6_label_table2 <- renderUI({
+    lbl <- if (isTRUE(input$consecutivo))
+      "Clausulas mixtas (grupos de mas de un enunciado)"
+    else
+      "Enunciados con varias clausulas internas"
+    div(class = "sec-label", lbl)
+  })
+
+  # NON-CONSECUTIVE: utterances classified by number of internal clauses
+  cat_data_noc <- reactive({
+    req(resultado())
+    res <- resultado()
+
+    enun_detail <- res |>
+      group_by(enunciado) |>
+      summarise(
+        n_clausulas = n_distinct(clausula_slope_st),
+        clausulas   = paste(unique(clausula_slope_st), collapse = ", "),
+        dirs        = paste(na.omit(unique(dir_slope_st)), collapse = ", "),
+        n_grupos    = n(),
+        .groups     = "drop"
+      ) |>
+      mutate(categoria = case_when(
+        n_clausulas == 1 ~ "1 clausula",
+        n_clausulas == 2 ~ "2 clausulas",
+        TRUE             ~ "3+ clausulas"
+      ))
+
+    cat_summary <- enun_detail |>
+      count(categoria, name = "n_enun") |>
+      right_join(tibble(categoria = c("1 clausula", "2 clausulas", "3+ clausulas")),
+                 by = "categoria") |>
+      mutate(
+        n_enun    = coalesce(n_enun, 0L),
+        categoria = factor(categoria, levels = c("1 clausula", "2 clausulas", "3+ clausulas")),
+        pct       = n_enun / sum(n_enun) * 100,
+        label     = paste0(n_enun, "\n(", round(pct, 1), "%)")
+      ) |>
+      arrange(categoria)
+
+    list(summary = cat_summary, detail = enun_detail)
+  })
+
+  # NON-CONSECUTIVE chi-square: utterance × clause-direction contingency
+  chi_data_noc <- reactive({
+    req(resultado())
+    res <- resultado()
+    tbl <- res |>
+      filter(!is.na(dir_slope_st)) |>
+      count(enunciado, dir_slope_st) |>
+      pivot_wider(names_from = dir_slope_st, values_from = n, values_fill = 0L)
+    if (nrow(tbl) < 2) return(NULL)
+    cont <- as.matrix(tbl[, -1, drop = FALSE])
+    rownames(cont) <- tbl$enunciado
+    cont
+  })
+
+  chi_test_noc <- reactive({
+    m <- chi_data_noc()
+    if (is.null(m) || any(dim(m) < 2)) return(NULL)
+    tryCatch(chisq.test(m, simulate.p.value = TRUE, B = 5000), error = function(e) NULL)
+  })
+
   # Reactive: ordenar clausulas numericamente para que el heatmap sea coherente
   chi_data <- reactive({
     req(resultado())
@@ -957,31 +1059,43 @@ server <- function(input, output, session) {
   }
 
   output$chi_stat_chi2 <- renderUI({
-    req(chi_test())
-    mk_stat_chi(round(chi_test()$statistic, 2), "chi cuadrado")
+    tst <- if (isTRUE(input$consecutivo)) chi_test() else chi_test_noc()
+    req(tst)
+    mk_stat_chi(round(tst$statistic, 2), "chi cuadrado")
   })
   output$chi_stat_p <- renderUI({
-    req(chi_test())
-    p <- chi_test()$p.value
+    tst <- if (isTRUE(input$consecutivo)) chi_test() else chi_test_noc()
+    req(tst)
+    p   <- tst$p.value
     lbl <- if (p < 0.001) "p < 0.001" else paste0("p = ", round(p, 4))
     cls <- if (p < 0.05) "stat-card stat-asc" else "stat-card stat-plan"
     mk_stat_chi(lbl, "p-valor (Monte Carlo)", cls)
   })
   output$chi_stat_v <- renderUI({
-    req(chi_test(), chi_data())
-    ct <- chi_data()$cont
-    n  <- sum(ct)
-    k  <- min(nrow(ct), ncol(ct)) - 1
-    v  <- if (k > 0) round(sqrt(chi_test()$statistic / (n * k)), 3) else NA
+    tst <- if (isTRUE(input$consecutivo)) chi_test() else chi_test_noc()
+    req(tst)
+    if (isTRUE(input$consecutivo)) {
+      ct <- chi_data()$cont; n <- sum(ct); k <- min(nrow(ct), ncol(ct)) - 1
+    } else {
+      ct <- chi_data_noc();  n <- sum(ct); k <- min(nrow(ct), ncol(ct)) - 1
+    }
+    v <- if (!is.null(ct) && k > 0) round(sqrt(tst$statistic / (n * k)), 3) else NA
     mk_stat_chi(v, "V de Cramer")
   })
   output$chi_stat_mix <- renderUI({
-    req(chi_data())
-    n_mix <- chi_data()$res |>
-      group_by(clausula_slope_st) |>
-      summarise(nd = n_distinct(enunciado), .groups = "drop") |>
-      filter(nd > 1) |> nrow()
-    mk_stat_chi(n_mix, "clausulas mixtas", "stat-card stat-desc")
+    if (isTRUE(input$consecutivo)) {
+      req(chi_data())
+      n_mix <- chi_data()$res |>
+        group_by(clausula_slope_st) |>
+        summarise(nd = n_distinct(enunciado), .groups = "drop") |>
+        filter(nd > 1) |> nrow()
+      mk_stat_chi(n_mix, "clausulas mixtas", "stat-card stat-desc")
+    } else {
+      req(cat_data_noc())
+      det  <- cat_data_noc()$detail
+      n_m  <- sum(det$n_clausulas > 1)
+      mk_stat_chi(n_m, "enunciados con 2+ clausulas", "stat-card stat-desc")
+    }
   })
 
   # Categorias de clausulas segun numero de enunciados y tipo de cruce
@@ -1034,14 +1148,43 @@ server <- function(input, output, session) {
   })
 
   output$barplot_chi <- renderPlotly({
-    req(cat_data())
-    df <- cat_data()
-
-    pal <- c(
-      "Pura\n(1 enunciado)"       = "#4a4a4a",
-      "Mixta\ncruce en frontera"  = "#d68910",
-      "Mixta\nsin cruce directo"  = "#c0392b"
-    )
+    if (isTRUE(input$consecutivo)) {
+      # ---- consecutive: clauses by utterance-span category ----
+      req(cat_data())
+      df <- cat_data()
+      pal <- c(
+        "Pura\n(1 enunciado)"       = "#4a4a4a",
+        "Mixta\ncruce en frontera"  = "#d68910",
+        "Mixta\nsin cruce directo"  = "#c0392b"
+      )
+      n_total <- sum(df$n_clausulas)
+      n_mix   <- sum(df$n_clausulas[df$categoria != "Pura\n(1 enunciado)"])
+      subtt   <- paste0("Total clausulas: ", n_total,
+                        "  |  Clausulas mixtas (2+ enunciados): ", n_mix,
+                        " (", round(n_mix / n_total * 100, 1), "%)")
+      ylab  <- "% de clausulas"
+      title <- "Distribucion de clausulas segun enunciados que las componen"
+      fname <- "clausulas_chi"
+    } else {
+      # ---- non-consecutive: utterances by clause-count category ----
+      req(cat_data_noc())
+      df  <- cat_data_noc()$summary
+      pal <- c(
+        "1 clausula"   = "#4a4a4a",
+        "2 clausulas"  = "#d68910",
+        "3+ clausulas" = "#c0392b"
+      )
+      n_total <- sum(df$n_enun)
+      n_multi <- sum(df$n_enun[df$categoria != "1 clausula"])
+      subtt   <- paste0("Total enunciados: ", n_total,
+                        "  |  Enunciados con varias clausulas: ", n_multi,
+                        " (", round(n_multi / n_total * 100, 1), "%)")
+      # Rename n_enun → n_clausulas so the ggplot aes works with a single block
+      df    <- df |> rename(n_clausulas = n_enun)
+      ylab  <- "% de enunciados"
+      title <- "Distribucion de enunciados segun clausulas en su interior"
+      fname <- "enunciados_clausulas"
+    }
 
     p <- ggplot(df, aes(x = categoria, y = pct, fill = categoria)) +
       geom_col(width = 0.55, color = "white", linewidth = 0.4) +
@@ -1052,12 +1195,7 @@ server <- function(input, output, session) {
       scale_y_continuous(labels = function(x) paste0(x, "%"),
                          expand = expansion(mult = c(0, 0.18)),
                          limits = c(0, NA)) +
-      labs(title = "Distribucion de clausulas segun enunciados que las componen",
-           subtitle = paste0("Total clausulas: ", sum(df$n_clausulas),
-                             "  |  Clausulas mixtas (2+ enunciados): ",
-                             sum(df$n_clausulas[df$n_enun > 1]),
-                             " (", round(sum(df$pct[df$n_enun > 1]), 1), "%)"),
-           x = NULL, y = "% de clausulas") +
+      labs(title = title, subtitle = subtt, x = NULL, y = ylab) +
       theme_minimal(base_size = 13) +
       theme(
         panel.grid.major.x = element_blank(),
@@ -1068,22 +1206,52 @@ server <- function(input, output, session) {
         legend.position = "none",
         plot.background = element_rect(fill = "white", color = NA)
       )
-    ggplotly(p, tooltip = c("x", "y")) |> pl_config("clausulas_chi")
+    ggplotly(p, tooltip = c("x", "y")) |> pl_config(fname)
   })
 
   # Tabla de contingencia como DT
   output$tabla_chi <- renderDT({
-    req(chi_data())
-    df <- as.data.frame.matrix(chi_data()$cont)
+    if (isTRUE(input$consecutivo)) {
+      req(chi_data())
+      df <- as.data.frame.matrix(chi_data()$cont)
+    } else {
+      m <- chi_data_noc()
+      req(!is.null(m))
+      df <- as.data.frame.matrix(m)
+    }
     datatable(df,
       options = list(pageLength = 20, scrollX = TRUE, dom = "lrtip",
         language = list(url="//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json")),
       class = "stripe hover")
   })
 
-  # Clausulas mixtas con clasificacion de tipo de cruce
+  # Clausulas mixtas (consecutive) / enunciados con varias clausulas (non-consecutive)
   output$tabla_mixtas <- renderDT({
     req(resultado())
+
+    if (!isTRUE(input$consecutivo)) {
+      req(cat_data_noc())
+      det <- cat_data_noc()$detail |>
+        filter(n_clausulas > 1) |>
+        arrange(desc(n_clausulas), enunciado)
+      if (nrow(det) == 0) {
+        return(datatable(
+          tibble(Nota = "Todos los enunciados tienen una sola clausula interna."),
+          rownames = FALSE))
+      }
+      return(
+        det |>
+          rename("Enunciado"   = enunciado,
+                 "N clausulas" = n_clausulas,
+                 "Clausulas"   = clausulas,
+                 "Direcciones" = dirs,
+                 "N grupos"    = n_grupos) |>
+          datatable(options = list(pageLength = 15, scrollX = TRUE, dom = "lrtip",
+            language = list(url="//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json")),
+            rownames = FALSE, class = "stripe hover")
+      )
+    }
+
     res <- resultado() |> arrange(x)
 
     enun_max <- res |> group_by(enunciado) |>
